@@ -22,10 +22,48 @@ except ImportError:
     HAS_GPD = False
 
 # --- HELPER FUNCTIONS ---
-def dms_to_dd(deg, min, sec, direction):
-    dd = float(deg) + (float(min) / 60.0) + (float(sec) / 3600.0)
-    if direction.upper() in ['S', 'W']: return -dd
-    return dd
+def parse_emlid_clipboard(pasted_text):
+    """
+    Extracts Latitude and Longitude from text copied out of Emlid Flow.
+    Handles commas as decimals, degree symbols, and cardinal direction tags.
+    """
+    if not pasted_text:
+        return None, None
+        
+    # Standardize commas to dots for decimal parsing
+    clean_text = str(pasted_text).replace(',', '.').upper()
+    
+    # Regex looks for a signed float, followed by optional junk chars, followed by optional N,S,E,W
+    pattern = r'([-+]?\d+\.\d+)[^\dNSEW]*([NSEW])?'
+    matches = re.findall(pattern, clean_text)
+    
+    if len(matches) >= 2:
+        lat, lon = None, None
+        for val_str, dir_ in matches[:2]:
+            val = float(val_str)
+            
+            # Correct the sign if the text is formatted as positive but labeled South/West
+            if dir_ in ['S', 'W'] and val > 0:
+                val = -val
+                
+            # Assign to lat or lon based on Emlid's cardinal direction label
+            if dir_ in ['N', 'S']:
+                lat = val
+            elif dir_ in ['E', 'W']:
+                lon = val
+                
+        # Fallback if no letters were found (e.g. standard "Lat, Lon" Google Maps paste)
+        if lat is None and lon is None:
+            lat = float(matches[0][0])
+            lon = float(matches[1][0])
+        elif lat is None:
+            lat = float(matches[0][0]) if float(matches[0][0]) != lon else float(matches[1][0])
+        elif lon is None:
+            lon = float(matches[0][0]) if float(matches[0][0]) != lat else float(matches[1][0])
+            
+        return lat, lon
+        
+    return None, None
 
 def calculate_bearing(lat1, lon1, lat2, lon2):
     lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
@@ -40,16 +78,12 @@ def move_point(start_pt, bearing, distance_m):
     return (new_pt.latitude, new_pt.longitude)
 
 def get_base_map(center_lat, center_lon, zoom=18):
-    """Returns a Folium map optimized for mobile tracking with no auto-refreshing."""
     m = folium.Map(location=[center_lat, center_lon], zoom_start=zoom, control_scale=True, max_zoom=30)
-    
-    # max_native_zoom prevents the map from turning gray when you zoom in close
     folium.TileLayer(
         tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
         attr='Esri', name='Esri Satellite', max_native_zoom=18, max_zoom=30, overlay=False
     ).add_to(m)
     
-    # Tracks the user smoothly via Javascript without telling Python (prevents flashing)
     plugins.LocateControl(
         position="topleft", drawCircle=True, flyTo=True, keepCurrentZoomLevel=True,
         strings={"title": "Track my live location"}, auto_start=True,
@@ -62,18 +96,16 @@ def get_base_map(center_lat, center_lon, zoom=18):
 st.set_page_config(page_title="Field Trial Grid", layout="centered")
 st.title("🌱 Field Trial Grid")
 
-# Initialize Session State Variables
+# Initialize Session State
 if 'generated' not in st.session_state: st.session_state.generated = False
 if 'p1_saved' not in st.session_state: st.session_state.p1_saved = False
 if 'p2_saved' not in st.session_state: st.session_state.p2_saved = False
 
-# Grid Dimension State 
 if 'rows' not in st.session_state: st.session_state.rows = 10
 if 'cols' not in st.session_state: st.session_state.cols = 4
 if 'plot_len' not in st.session_state: st.session_state.plot_len = 5.0
 if 'plot_wid' not in st.session_state: st.session_state.plot_wid = 2.0
 
-# Starting Default Location 
 if 'p1_lat' not in st.session_state: st.session_state.p1_lat = -22.4471995785483
 if 'p1_lon' not in st.session_state: st.session_state.p1_lon = -47.07321466883996
 if 'p2_lat' not in st.session_state: st.session_state.p2_lat = -22.4481995785483 
@@ -85,39 +117,71 @@ if 'p2_lon' not in st.session_state: st.session_state.p2_lon = -47.0732146688399
 # ==========================================
 map_container = st.container()
 
-
 # ==========================================
 # 2. BOTTOM SECTION: CAPTURE HUB
 # ==========================================
 if not st.session_state.generated:
     st.divider()
     st.subheader("🎯 Capture Location")
-    st.caption("1. Tap the icon below to read your GNSS. 2. Choose A or B to save it.")
     
-    # The Geolocation Button
-    gps_loc = streamlit_geolocation()
+    gnss_source = st.radio("Select Input Method:", ["📋 Paste from Emlid Flow", "📱 Mobile Browser GPS (Low Accuracy)"], horizontal=True)
     
-    # Save Buttons
-    c1, c2 = st.columns(2)
-    if c1.button("📍 Save Point A (Start)", use_container_width=True):
-        if gps_loc and gps_loc.get('latitude'):
-            st.session_state.p1_lat = float(gps_loc['latitude'])
-            st.session_state.p1_lon = float(gps_loc['longitude'])
-            st.session_state.p1_saved = True
-            st.rerun()
-        else:
-            st.warning("⚠️ Tap the 'Get Location' icon above first!")
-            
-    if c2.button("📍 Save Point B (Aim)", use_container_width=True):
-        if gps_loc and gps_loc.get('latitude'):
-            st.session_state.p2_lat = float(gps_loc['latitude'])
-            st.session_state.p2_lon = float(gps_loc['longitude'])
-            st.session_state.p2_saved = True
-            st.rerun()
-        else:
-            st.warning("⚠️ Tap the 'Get Location' icon above first!")
+    if gnss_source == "📋 Paste from Emlid Flow":
+        st.info("Swipe to Emlid Flow, tap your coordinates to copy them, and paste below.")
+        
+        c1, c2 = st.columns(2)
+        # Using text_area allows pasting multi-line strings easily on mobile
+        paste_a = c1.text_area("📍 Paste Point A (Start) here:", height=68)
+        paste_b = c2.text_area("📍 Paste Point B (Aim) here:", height=68)
+        
+        if paste_a:
+            lat_a, lon_a = parse_emlid_clipboard(paste_a)
+            if lat_a and lon_a:
+                st.session_state.p1_lat = lat_a
+                st.session_state.p1_lon = lon_a
+                st.session_state.p1_saved = True
+                c1.success(f"Saved: {lat_a:.6f}, {lon_a:.6f}")
+            else:
+                c1.error("Could not find coordinates in text.")
+                
+        if paste_b:
+            lat_b, lon_b = parse_emlid_clipboard(paste_b)
+            if lat_b and lon_b:
+                st.session_state.p2_lat = lat_b
+                st.session_state.p2_lon = lon_b
+                st.session_state.p2_saved = True
+                c2.success(f"Saved: {lat_b:.6f}, {lon_b:.6f}")
+            else:
+                c2.error("Could not find coordinates in text.")
+                
+        if paste_a or paste_b:
+            if st.button("🔄 Update Map View", use_container_width=True):
+                st.rerun()
 
-    # Grid Configuration (Saved firmly to session_state)
+    elif gnss_source == "📱 Mobile Browser GPS (Low Accuracy)":
+        st.caption("Tap the icon below to read your browser's location.")
+        gps_loc = streamlit_geolocation()
+        
+        c1, c2 = st.columns(2)
+        if c1.button("📍 Save Point A (Start)", use_container_width=True):
+            if gps_loc and gps_loc.get('latitude'):
+                st.session_state.p1_lat = float(gps_loc['latitude'])
+                st.session_state.p1_lon = float(gps_loc['longitude'])
+                st.session_state.p1_saved = True
+                st.rerun()
+            else:
+                st.warning("⚠️ Tap the 'Get Location' icon above first!")
+                
+        if c2.button("📍 Save Point B (Aim)", use_container_width=True):
+            if gps_loc and gps_loc.get('latitude'):
+                st.session_state.p2_lat = float(gps_loc['latitude'])
+                st.session_state.p2_lon = float(gps_loc['longitude'])
+                st.session_state.p2_saved = True
+                st.rerun()
+            else:
+                st.warning("⚠️ Tap the 'Get Location' icon above first!")
+
+    # Grid Configuration
     with st.expander("📐 Grid Dimensions", expanded=True):
         col1, col2 = st.columns(2)
         st.session_state.rows = col1.number_input("Rows", min_value=1, value=st.session_state.rows, step=1)
@@ -125,37 +189,9 @@ if not st.session_state.generated:
         col3, col4 = st.columns(2)
         st.session_state.plot_len = col3.number_input("Length (m)", min_value=0.1, value=st.session_state.plot_len, step=0.5)
         st.session_state.plot_wid = col4.number_input("Width (m)", min_value=0.1, value=st.session_state.plot_wid, step=0.5)
-        
-    # Manual Coordinate View/Edit
-    with st.expander("✏️ View/Edit Coordinates", expanded=False):
-        input_format = st.radio("Format", ["Decimal Degrees (DD)", "GMS (Single Smart Field)"])
-        
-        if input_format == "Decimal Degrees (DD)":
-            st.write("Edit manually if needed. Coordinates update automatically when you save points above.")
-            new_p1_lat = st.number_input("Point A Lat", value=st.session_state.p1_lat, format="%.8f")
-            new_p1_lon = st.number_input("Point A Lon", value=st.session_state.p1_lon, format="%.8f")
-            new_p2_lat = st.number_input("Point B Lat", value=st.session_state.p2_lat, format="%.8f")
-            new_p2_lon = st.number_input("Point B Lon", value=st.session_state.p2_lon, format="%.8f")
-            
-            if st.button("Apply Manual Edit", use_container_width=True):
-                st.session_state.p1_lat, st.session_state.p1_lon = new_p1_lat, new_p1_lon
-                st.session_state.p2_lat, st.session_state.p2_lon = new_p2_lat, new_p2_lon
-                st.session_state.p1_saved = True
-                st.session_state.p2_saved = True
-                st.rerun()
-                
-        elif input_format == "GMS (Single Smart Field)":
-            st.write("**Point A (Start)**")
-            lat1_smart = st.text_input("A Lat", value="22 26 49.9 S")
-            lon1_smart = st.text_input("A Lon", value="47 04 23.6 W")
-            st.write("**Point B (Direction)**")
-            lat2_smart = st.text_input("B Lat", value="22 26 53.5 S")
-            lon2_smart = st.text_input("B Lon", value="47 04 23.6 W")
-            st.info("The Smart Field parsing handles coordinates on generation.")
 
     st.divider()
 
-    # Generate Button
     if st.button("🚀 GENERATE FIELD GRID", type="primary", use_container_width=True):
         if not (st.session_state.p1_saved and st.session_state.p2_saved):
             st.warning("⚠️ Please save both Point A and Point B first.")
@@ -170,10 +206,8 @@ if not st.session_state.generated:
 with map_container:
     # --- PHASE 1: ALIGNMENT & CAPTURE ---
     if not st.session_state.generated:
-        # Start the map at P1, Zoom 18 (~200m scale)
         m_live = get_base_map(st.session_state.p1_lat, st.session_state.p1_lon, zoom=18)
         
-        # Draw the points if the user has saved them
         if st.session_state.p1_saved:
             folium.Marker([st.session_state.p1_lat, st.session_state.p1_lon], tooltip="Point A", icon=folium.Icon(color="green")).add_to(m_live)
         if st.session_state.p2_saved:
@@ -181,7 +215,6 @@ with map_container:
         if st.session_state.p1_saved and st.session_state.p2_saved:
             folium.PolyLine([(st.session_state.p1_lat, st.session_state.p1_lon), (st.session_state.p2_lat, st.session_state.p2_lon)], color="yellow", weight=4).add_to(m_live)
 
-        # returned_objects=[] guarantees the map never flashes or forces Streamlit to rerun
         st_folium(m_live, use_container_width=True, height=450, returned_objects=[])
 
     # --- PHASE 2: GRID GENERATION & EXPORTS ---
@@ -191,7 +224,6 @@ with map_container:
         bearing_perp = (bearing + 90) % 360
         
         plot_data = []
-        # Uses session_state for grid dimensions here
         for r in range(st.session_state.rows):
             for c in range(st.session_state.cols):
                 dist_down = r * st.session_state.plot_len
@@ -218,7 +250,6 @@ with map_container:
         
         m_grid = get_base_map(start_point[0], start_point[1], zoom=19)
 
-        # Draw the Alignment Vector and Plots
         folium.PolyLine([(st.session_state.p1_lat, st.session_state.p1_lon), (st.session_state.p2_lat, st.session_state.p2_lon)], color="yellow", weight=4).add_to(m_grid)
         folium.Marker([st.session_state.p1_lat, st.session_state.p1_lon], tooltip="Point A", icon=folium.Icon(color="green")).add_to(m_grid)
         
@@ -227,7 +258,6 @@ with map_container:
             coords.append(coords[0]) 
             folium.Polygon(locations=coords, color="white", weight=1, fill=True, fill_color="green", fill_opacity=0.3, tooltip=f"Plot {plot['Plot_ID']}").add_to(m_grid)
 
-        # Auto-zoom map to fit the generated grid perfectly
         sw = (min([lat for lat, lon in outside_corners]), min([lon for lat, lon in outside_corners]))
         ne = (max([lat for lat, lon in outside_corners]), max([lon for lat, lon in outside_corners]))
         m_grid.fit_bounds([sw, ne])
@@ -237,13 +267,11 @@ with map_container:
         # --- EXPORT LOGIC ---
         st.subheader("💾 Download Formats")
         
-        # UI Toggles for KML Content
         st.write("**KML Options:**")
         opt_col1, opt_col2 = st.columns(2)
         kml_export_polygons = opt_col1.checkbox("Include Polygons", value=True)
         kml_export_waypoints = opt_col2.checkbox("Include Serpentine Waypoints", value=True)
         
-        # 1. Serpentine Stakeout Routing (For Emlid Flow)
         stake_points = []
         stake_id = 1
         for r in range(st.session_state.rows):
@@ -254,7 +282,6 @@ with map_container:
                 stake_points.append({"Stake_ID": f"S{stake_id:03d}", "Plot_ID": p["Plot_ID"], "Lat": bl_lat, "Lon": bl_lon})
                 stake_id += 1
 
-        # 2. KML File Generation (Conditional based on user checkboxes)
         kml = simplekml.Kml()
         
         if kml_export_polygons:
@@ -273,7 +300,6 @@ with map_container:
                 
         kml_string = kml.kml()
 
-        # Dynamic KML Button Label
         if kml_export_polygons and kml_export_waypoints:
             kml_label = "📥 KML (Polygons & Waypoints)"
         elif kml_export_polygons:
@@ -283,7 +309,6 @@ with map_container:
         else:
             kml_label = "📥 KML (Empty)"
 
-        # 3. GeoJSON Generation
         features = []
         for p in plot_data:
             coords = [[lon, lat] for lat, lon in p["Corners_DD"]]
@@ -291,14 +316,12 @@ with map_container:
             features.append({"type": "Feature", "properties": {"Plot_ID": p["Plot_ID"], "Row": p["Row"], "Col": p["Col"]}, "geometry": {"type": "Polygon", "coordinates": [coords]}})
         geojson_str = json.dumps({"type": "FeatureCollection", "features": features})
 
-        # 4. Render Buttons
         dl_col1, dl_col2 = st.columns(2)
         with dl_col1:
             st.download_button(kml_label, data=kml_string, file_name="field_grid.kml", mime="application/vnd.google-earth.kml+xml", use_container_width=True, disabled=not(kml_export_polygons or kml_export_waypoints))
         with dl_col2:
             st.download_button("📥 GeoJSON File", data=geojson_str, file_name="field_grid.geojson", mime="application/geo+json", use_container_width=True)
 
-        # 5. Shapefile Generation
         if HAS_GPD:
             try:
                 gdf = gpd.GeoDataFrame.from_features(json.loads(geojson_str)["features"])
@@ -314,8 +337,6 @@ with map_container:
                 st.download_button("📥 Shapefile (ZIP format)", data=shp_io, file_name="field_grid_shapefile.zip", mime="application/zip", use_container_width=True)
             except Exception as e:
                 st.error(f"Shapefile generation error: {e}")
-        else:
-            st.info("💡 Tip: Add `geopandas` to your requirements.txt to enable Shapefile downloads.")
 
         st.write("---")
         if st.button("🔙 Adjust Grid Settings", use_container_width=True):
