@@ -67,9 +67,10 @@ def get_centroid(corners):
     lons = [pt[1] for pt in corners]
     return (sum(lats) / len(corners), sum(lons) / len(corners))
 
-def get_base_map(center_lat, center_lon, zoom=19):
-    """Returns a Folium map with Esri Satellite imagery."""
-    m = folium.Map(location=[center_lat, center_lon], zoom_start=zoom, control_scale=True)
+def get_base_map():
+    """Returns a Folium map with Esri Satellite imagery and High-Accuracy Live Tracking."""
+    # We initiate without a center, it will auto-fit later
+    m = folium.Map(control_scale=True)
     folium.TileLayer(
         tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
         attr='Esri',
@@ -78,13 +79,19 @@ def get_base_map(center_lat, center_lon, zoom=19):
         control=True
     ).add_to(m)
     
-    # Adds the live browser location tracking button (The fix for mobile)
+    # Forces Safari/Chrome to use the GPS chip, not cached cell-tower data
     plugins.LocateControl(
         position="topleft",
         drawCircle=True,
         flyTo=True,
-        strings={"title": "Show my live location"},
-        auto_start=True  # Immediately requests location on load
+        keepCurrentZoomLevel=True,
+        strings={"title": "Track my live location"},
+        locateOptions={
+            "enableHighAccuracy": True, 
+            "maximumAge": 0, 
+            "timeout": 10000, 
+            "watch": True
+        }
     ).add_to(m)
     
     return m
@@ -110,23 +117,29 @@ with st.sidebar:
     
     if input_format == "Decimal Degrees (DD)":
         st.subheader("🛰️ RTK GPS Capture")
-        st.caption("Use the map to walk to your spot. When ready, click to capture coordinates here, then assign.")
+        st.caption("Let the blue dot settle on the map. Then, click to grab coordinates and assign.")
         
         gps_loc = streamlit_geolocation()
         if gps_loc and gps_loc.get('latitude'):
             st.session_state.raw_gps_lat = float(gps_loc['latitude'])
             st.session_state.raw_gps_lon = float(gps_loc['longitude'])
-            st.success(f"📍 Captured: {st.session_state.raw_gps_lat:.6f}, {st.session_state.raw_gps_lon:.6f}")
+            st.success(f"📍 Ready: {st.session_state.raw_gps_lat:.6f}, {st.session_state.raw_gps_lon:.6f}")
             
             c1, c2 = st.columns(2)
-            if c1.button("Set as P1"):
+            if c1.button("Set as P1 (Start)"):
                 st.session_state.p1_lat = st.session_state.raw_gps_lat
                 st.session_state.p1_lon = st.session_state.raw_gps_lon
+                # Crucial Fix: Bring P2 right next to P1 so the map doesn't zoom out across the country
+                st.session_state.p2_lat = st.session_state.raw_gps_lat - 0.0001
+                st.session_state.p2_lon = st.session_state.raw_gps_lon
                 st.session_state.generated = False 
-            if c2.button("Set as P2"):
+                st.rerun() # Forces instant UI/Map update
+                
+            if c2.button("Set as P2 (Aim)"):
                 st.session_state.p2_lat = st.session_state.raw_gps_lat
                 st.session_state.p2_lon = st.session_state.raw_gps_lon
                 st.session_state.generated = False 
+                st.rerun() # Forces instant UI/Map update
                 
         st.write("---")
         st.write("**First Plot Outside Corner (P1)**")
@@ -198,20 +211,22 @@ except Exception:
 # --- MAIN DISPLAY AREA ---
 if not st.session_state.generated:
     st.subheader("📍 Live Point Verification")
-    st.info("The map is tracking you live. Walk to your points, capture the GPS in the sidebar, and assign them. Once aligned, click **Generate Grid**.")
+    st.info("The map is tracking you live. Walk to your points, grab the GPS, and assign them. Once aligned, click **Generate Grid**.")
     
-    # Center map on user's last captured GPS if available, otherwise P1
-    center_lat = st.session_state.raw_gps_lat if st.session_state.raw_gps_lat else cur_lat1
-    center_lon = st.session_state.raw_gps_lon if st.session_state.raw_gps_lon else cur_lon1
+    m_live = get_base_map()
     
-    m_live = get_base_map(center_lat, center_lon)
-    
-    # Alignment Vector & Points
-    folium.PolyLine([(cur_lat1, cur_lon1), (cur_lat2, cur_lon2)], color="yellow", weight=3, opacity=0.8).add_to(m_live)
+    # Draw P1, P2, and the bold yellow Alignment Vector
+    folium.PolyLine([(cur_lat1, cur_lon1), (cur_lat2, cur_lon2)], color="yellow", weight=4, opacity=0.9).add_to(m_live)
     folium.Marker([cur_lat1, cur_lon1], tooltip="P1 (Start)", icon=folium.Icon(color="green")).add_to(m_live)
     folium.Marker([cur_lat2, cur_lon2], tooltip="P2 (Direction)", icon=folium.Icon(color="red")).add_to(m_live)
 
-    # returned_objects=[] prevents the app from rerunning every time you touch the map on mobile
+    # Automatically zoom the map so the P1 -> P2 line fits perfectly on screen
+    sw = (min(cur_lat1, cur_lat2), min(cur_lon1, cur_lon2))
+    ne = (max(cur_lat1, cur_lat2), max(cur_lon1, cur_lon2))
+    buffer = 0.0001 # Tiny buffer so markers aren't on the exact edge of the screen
+    m_live.fit_bounds([(sw[0]-buffer, sw[1]-buffer), (ne[0]+buffer, ne[1]+buffer)])
+
+    # returned_objects=[] prevents the app from reloading if you touch the map
     st_folium(m_live, use_container_width=True, height=600, returned_objects=[])
 
 else:
@@ -245,14 +260,14 @@ else:
         outside_corners = [grid_tl, grid_bl, grid_br, grid_tr]
 
         st.subheader("📍 Generated Grid Map")
-        m_grid = get_base_map(cur_lat1, cur_lon1)
+        m_grid = get_base_map()
 
-        folium.PolyLine([(cur_lat1, cur_lon1), (cur_lat2, cur_lon2)], color="yellow", weight=3).add_to(m_grid)
+        folium.PolyLine([(cur_lat1, cur_lon1), (cur_lat2, cur_lon2)], color="yellow", weight=4).add_to(m_grid)
 
         # Draw generated plots
         for plot in plot_data:
             coords = plot["Corners_DD"].copy()
-            coords.append(coords[0]) # Close the polygon
+            coords.append(coords[0]) 
             
             folium.Polygon(
                 locations=coords,
@@ -263,6 +278,11 @@ else:
                 fill_opacity=0.3,
                 tooltip=f"Plot {plot['Plot_ID']}"
             ).add_to(m_grid)
+
+        # Center map on the generated grid
+        sw = (min([lat for lat, lon in outside_corners]), min([lon for lat, lon in outside_corners]))
+        ne = (max([lat for lat, lon in outside_corners]), max([lon for lat, lon in outside_corners]))
+        m_grid.fit_bounds([sw, ne])
 
         st_folium(m_grid, use_container_width=True, height=600, returned_objects=[])
 
