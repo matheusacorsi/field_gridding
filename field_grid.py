@@ -5,22 +5,20 @@ import simplekml
 import io
 import re
 from geopy.distance import geodesic
-import plotly.graph_objects as go
+import folium
+from folium import plugins
+from streamlit_folium import st_folium
 from streamlit_geolocation import streamlit_geolocation
 
 # --- HELPER FUNCTIONS ---
 def dms_to_dd(deg, min, sec, direction):
-    """Converts Degrees, Minutes, Seconds to Decimal Degrees."""
     dd = float(deg) + (float(min) / 60.0) + (float(sec) / 3600.0)
     if direction.upper() in ['S', 'W']:
         dd = -dd
     return dd
 
 def parse_coordinate(coord_str, format_type):
-    """Parses the coordinate string for the Single Smart Field option."""
-    if not coord_str:
-        return 0.0
-    
+    if not coord_str: return 0.0
     coord_str = str(coord_str).strip()
     
     if format_type == "GMS (Single Smart Field)":
@@ -36,14 +34,12 @@ def parse_coordinate(coord_str, format_type):
             seconds = float(numbers[2].replace(',', '.'))
             
             dd = degrees + (minutes / 60.0) + (seconds / 3600.0)
-            if direction in ['S', 'W']:
-                dd = -dd
+            if direction in ['S', 'W']: dd = -dd
             return dd
         else:
             raise ValueError(f"Could not find Degrees, Minutes, and Seconds in '{coord_str}'.")
 
 def dd_to_dms(deg, is_lat=True):
-    """Converts Decimal Degrees to Degrees Minutes Seconds format."""
     d = int(deg)
     m = int((abs(deg) - abs(d)) * 60)
     s = (abs(deg) - abs(d) - m/60) * 3600
@@ -54,7 +50,6 @@ def dd_to_dms(deg, is_lat=True):
     return f"{abs(d)}°{m}'{s:.2f}\"{direction}"
 
 def calculate_bearing(lat1, lon1, lat2, lon2):
-    """Calculates the initial bearing from point 1 to point 2."""
     lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
     d_lon = lon2 - lon1
     x = math.sin(d_lon) * math.cos(lat2)
@@ -63,40 +58,36 @@ def calculate_bearing(lat1, lon1, lat2, lon2):
     return (math.degrees(initial_bearing) + 360) % 360
 
 def move_point(start_pt, bearing, distance_m):
-    """Returns a new (lat, lon) after moving a distance at a given bearing."""
-    if distance_m == 0:
-        return start_pt
+    if distance_m == 0: return start_pt
     new_pt = geodesic(meters=distance_m).destination(start_pt, bearing)
     return (new_pt.latitude, new_pt.longitude)
 
 def get_centroid(corners):
-    """Calculates the center point (lat, lon) of a polygon."""
     lats = [pt[0] for pt in corners]
     lons = [pt[1] for pt in corners]
     return (sum(lats) / len(corners), sum(lons) / len(corners))
 
-def get_mapbox_layout(lat, lon, token):
-    """Returns formatting dictionary for Plotly Mapbox to keep maps consistent."""
-    layout_args = dict(
-        margin=dict(l=0, r=0, t=0, b=0),
-        height=600,
-        showlegend=True,
-        legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01, bgcolor="rgba(255,255,255,0.8)")
-    )
-    if token:
-        layout_args["mapbox"] = dict(
-            accesstoken=token,
-            style="satellite-streets",
-            center=dict(lat=lat, lon=lon),
-            zoom=19 
-        )
-    else:
-        layout_args["mapbox"] = dict(
-            style="open-street-map",
-            center=dict(lat=lat, lon=lon),
-            zoom=19 
-        )
-    return layout_args
+def get_base_map(center_lat, center_lon, zoom=19):
+    """Returns a Folium map with Esri Satellite imagery."""
+    m = folium.Map(location=[center_lat, center_lon], zoom_start=zoom, control_scale=True)
+    folium.TileLayer(
+        tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+        attr='Esri',
+        name='Esri Satellite',
+        overlay=False,
+        control=True
+    ).add_to(m)
+    
+    # Adds the live browser location tracking button (The fix for mobile)
+    plugins.LocateControl(
+        position="topleft",
+        drawCircle=True,
+        flyTo=True,
+        strings={"title": "Show my live location"},
+        auto_start=True  # Immediately requests location on load
+    ).add_to(m)
+    
+    return m
 
 # --- STREAMLIT UI SETUP ---
 st.set_page_config(page_title="Field Trial Grid Generator", layout="wide")
@@ -119,13 +110,13 @@ with st.sidebar:
     
     if input_format == "Decimal Degrees (DD)":
         st.subheader("🛰️ RTK GPS Capture")
-        st.caption("Click to get your live location, then assign it to a point.")
+        st.caption("Use the map to walk to your spot. When ready, click to capture coordinates here, then assign.")
         
         gps_loc = streamlit_geolocation()
         if gps_loc and gps_loc.get('latitude'):
             st.session_state.raw_gps_lat = float(gps_loc['latitude'])
             st.session_state.raw_gps_lon = float(gps_loc['longitude'])
-            st.success("📍 Location Acquired!")
+            st.success(f"📍 Captured: {st.session_state.raw_gps_lat:.6f}, {st.session_state.raw_gps_lon:.6f}")
             
             c1, c2 = st.columns(2)
             if c1.button("Set as P1"):
@@ -175,7 +166,7 @@ with st.sidebar:
     
     st.header("3. KML Export Options")
     kml_polygons = st.checkbox("Include Polygons", value=True)
-    kml_centroids = st.checkbox("Include Centroids (Center points)", value=False)
+    kml_centroids = st.checkbox("Include Centroids", value=False)
     kml_corners = st.checkbox("Include Corner Waypoints", value=False)
 
     st.header("4. Excel Export Options")
@@ -185,7 +176,6 @@ with st.sidebar:
         st.session_state.generated = True
 
 # --- DYNAMIC COORDINATE PARSING ---
-# We extract this out of the generate block so the live map always has coordinates to display
 try:
     if input_format == "Decimal Degrees (DD)":
         cur_lat1, cur_lon1 = lat1_dd, lon1_dd
@@ -201,55 +191,30 @@ try:
         cur_lat2 = dms_to_dd(lat2_d, lat2_m, lat2_s, lat2_dir)
         cur_lon2 = dms_to_dd(lon2_d, lon2_m, lon2_s, lon2_dir)
 except Exception:
-    # Safe fallback if user is midway through typing a string
     cur_lat1, cur_lon1 = st.session_state.p1_lat, st.session_state.p1_lon
     cur_lat2, cur_lon2 = st.session_state.p2_lat, st.session_state.p2_lon
 
-# Mapbox token logic
-mapbox_token = st.secrets.get("MAPBOX_TOKEN", "")
 
 # --- MAIN DISPLAY AREA ---
-
 if not st.session_state.generated:
-    # 📍 LIVE VERIFICATION MAP
     st.subheader("📍 Live Point Verification")
-    st.info("Walk to your points, capture GPS, and assign them in the sidebar. Once aligned, click **Generate Grid**.")
+    st.info("The map is tracking you live. Walk to your points, capture the GPS in the sidebar, and assign them. Once aligned, click **Generate Grid**.")
     
-    fig_live = go.Figure()
+    # Center map on user's last captured GPS if available, otherwise P1
+    center_lat = st.session_state.raw_gps_lat if st.session_state.raw_gps_lat else cur_lat1
+    center_lon = st.session_state.raw_gps_lon if st.session_state.raw_gps_lon else cur_lon1
     
-    # Alignment Vector Line
-    fig_live.add_trace(go.Scattermapbox(
-        mode="lines", lon=[cur_lon1, cur_lon2], lat=[cur_lat1, cur_lat2],
-        line=dict(color='yellow', width=3), name="Alignment Vector"
-    ))
-    # P1
-    fig_live.add_trace(go.Scattermapbox(
-        mode="markers+text", lon=[cur_lon1], lat=[cur_lat1],
-        marker=dict(size=14, color='green'), name="P1 (Start)",
-        text=["P1"], textposition="top right"
-    ))
-    # P2
-    fig_live.add_trace(go.Scattermapbox(
-        mode="markers+text", lon=[cur_lon2], lat=[cur_lat2],
-        marker=dict(size=14, color='red'), name="P2 (Direction)",
-        text=["P2"], textposition="top right"
-    ))
-    # Live GPS Dot (if captured)
-    if st.session_state.raw_gps_lat is not None:
-        fig_live.add_trace(go.Scattermapbox(
-            mode="markers", lon=[st.session_state.raw_gps_lon], lat=[st.session_state.raw_gps_lat],
-            marker=dict(size=16, color='#00FFFF', symbol="circle"), name="📱 Current GPS"
-        ))
+    m_live = get_base_map(center_lat, center_lon)
+    
+    # Alignment Vector & Points
+    folium.PolyLine([(cur_lat1, cur_lon1), (cur_lat2, cur_lon2)], color="yellow", weight=3, opacity=0.8).add_to(m_live)
+    folium.Marker([cur_lat1, cur_lon1], tooltip="P1 (Start)", icon=folium.Icon(color="green")).add_to(m_live)
+    folium.Marker([cur_lat2, cur_lon2], tooltip="P2 (Direction)", icon=folium.Icon(color="red")).add_to(m_live)
 
-    # Center map on user's live GPS if available, else P1
-    center_lat = st.session_state.raw_gps_lat if st.session_state.raw_gps_lat is not None else cur_lat1
-    center_lon = st.session_state.raw_gps_lon if st.session_state.raw_gps_lon is not None else cur_lon1
-    
-    fig_live.update_layout(**get_mapbox_layout(center_lat, center_lon, mapbox_token))
-    st.plotly_chart(fig_live, use_container_width=True)
+    # returned_objects=[] prevents the app from rerunning every time you touch the map on mobile
+    st_folium(m_live, use_container_width=True, height=600, returned_objects=[])
 
 else:
-    # 🗺️ GENERATED GRID MAP & EXPORTS
     try:
         start_point = (cur_lat1, cur_lon1)
         bearing = calculate_bearing(cur_lat1, cur_lon1, cur_lat2, cur_lon2)
@@ -280,33 +245,26 @@ else:
         outside_corners = [grid_tl, grid_bl, grid_br, grid_tr]
 
         st.subheader("📍 Generated Grid Map")
-        fig_grid = go.Figure()
+        m_grid = get_base_map(cur_lat1, cur_lon1)
 
-        fig_grid.add_trace(go.Scattermapbox(
-            mode="lines", lon=[cur_lon1, cur_lon2], lat=[cur_lat1, cur_lat2],
-            line=dict(color='yellow', width=2), name="Alignment Vector"
-        ))
+        folium.PolyLine([(cur_lat1, cur_lon1), (cur_lat2, cur_lon2)], color="yellow", weight=3).add_to(m_grid)
 
-        # Add the plots
+        # Draw generated plots
         for plot in plot_data:
-            lats = [pt[0] for pt in plot["Corners_DD"]] + [plot["Corners_DD"][0][0]]
-            lons = [pt[1] for pt in plot["Corners_DD"]] + [plot["Corners_DD"][0][1]]
+            coords = plot["Corners_DD"].copy()
+            coords.append(coords[0]) # Close the polygon
             
-            fig_grid.add_trace(go.Scattermapbox(
-                mode="lines", fill="toself", fillcolor="rgba(0, 128, 0, 0.3)",
-                line=dict(color='white', width=1), lon=lons, lat=lats,
-                name=f"Plot {plot['Plot_ID']}", text=f"Plot {plot['Plot_ID']}", hoverinfo="text"
-            ))
+            folium.Polygon(
+                locations=coords,
+                color="white",
+                weight=1,
+                fill=True,
+                fill_color="green",
+                fill_opacity=0.3,
+                tooltip=f"Plot {plot['Plot_ID']}"
+            ).add_to(m_grid)
 
-        # Keep Live GPS Dot visible on the final grid
-        if st.session_state.raw_gps_lat is not None:
-            fig_grid.add_trace(go.Scattermapbox(
-                mode="markers", lon=[st.session_state.raw_gps_lon], lat=[st.session_state.raw_gps_lat],
-                marker=dict(size=16, color='#00FFFF', symbol="circle"), name="📱 Current GPS"
-            ))
-
-        fig_grid.update_layout(**get_mapbox_layout(cur_lat1, cur_lon1, mapbox_token))
-        st.plotly_chart(fig_grid, use_container_width=True)
+        st_folium(m_grid, use_container_width=True, height=600, returned_objects=[])
 
         # --- GENERATE FILES ---
         is_dd = (excel_coord_format == "Decimal Degrees (DD)")
