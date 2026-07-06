@@ -3,42 +3,29 @@ import pandas as pd
 import math
 import simplekml
 import io
+import os
 import re
+import json
+import tempfile
+import zipfile
 from geopy.distance import geodesic
 import folium
 from folium import plugins
 from streamlit_folium import st_folium
-from streamlit_geolocation import streamlit_geolocation
+
+# Try importing geopandas for Shapefile creation. 
+try:
+    import geopandas as gpd
+    from shapely.geometry import Polygon, Point
+    HAS_GPD = True
+except ImportError:
+    HAS_GPD = False
 
 # --- HELPER FUNCTIONS ---
 def dms_to_dd(deg, min, sec, direction):
     dd = float(deg) + (float(min) / 60.0) + (float(sec) / 3600.0)
     if direction.upper() in ['S', 'W']: return -dd
     return dd
-
-def parse_coordinate(coord_str, format_type):
-    if not coord_str: return 0.0
-    coord_str = str(coord_str).strip()
-    if format_type == "GMS (Single Smart Field)":
-        dir_match = re.search(r'(?i)([NSEW])', coord_str)
-        if not dir_match: raise ValueError("Missing direction (N, S, E, W)")
-        direction = dir_match.group(1).upper()
-        numbers = re.findall(r'\d+(?:[.,]\d+)?', coord_str)
-        if len(numbers) >= 3:
-            deg = float(numbers[0].replace(',', '.'))
-            min_ = float(numbers[1].replace(',', '.'))
-            sec = float(numbers[2].replace(',', '.'))
-            dd = deg + (min_ / 60.0) + (sec / 3600.0)
-            if direction in ['S', 'W']: dd = -dd
-            return dd
-        raise ValueError("Could not find Deg, Min, Sec")
-
-def dd_to_dms(deg, is_lat=True):
-    d = int(deg)
-    m = int((abs(deg) - abs(d)) * 60)
-    s = (abs(deg) - abs(d) - m/60) * 3600
-    dir_ = "N" if deg >= 0 else "S" if is_lat else "E" if deg >= 0 else "W"
-    return f"{abs(d)}°{m}'{s:.2f}\"{dir_}"
 
 def calculate_bearing(lat1, lon1, lat2, lon2):
     lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
@@ -53,43 +40,43 @@ def move_point(start_pt, bearing, distance_m):
     return (new_pt.latitude, new_pt.longitude)
 
 def get_centroid(corners):
-    lats = [pt[0] for pt in corners]
-    lons = [pt[1] for pt in corners]
+    lats, lons = [pt[0] for pt in corners], [pt[1] for pt in corners]
     return (sum(lats) / len(corners), sum(lons) / len(corners))
 
-def get_base_map():
-    """Returns a Folium map that allows extreme digital zooming without losing the satellite image."""
-    m = folium.Map(control_scale=True, max_zoom=30)
+def get_base_map(center_lat=None, center_lon=None, zoom=19):
+    """Returns a Folium map with Esri Satellite imagery and active tracking."""
+    kwargs = {"control_scale": True, "max_zoom": 30}
+    if center_lat and center_lon:
+        kwargs["location"] = [center_lat, center_lon]
+        kwargs["zoom_start"] = zoom
+
+    m = folium.Map(**kwargs)
     folium.TileLayer(
         tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-        attr='Esri',
-        name='Esri Satellite',
-        max_native_zoom=18, # Esri stops providing new tiles at zoom 18
-        max_zoom=30,        # Digitally stretch the zoom 18 tiles all the way to zoom 30
-        overlay=False,
-        control=True
+        attr='Esri', name='Esri Satellite', max_native_zoom=18, max_zoom=30, overlay=False
     ).add_to(m)
     
+    # Auto-tracking plugin (Forces browser to continuously update live location)
     plugins.LocateControl(
-        position="topleft",
-        drawCircle=True,
-        flyTo=True,
-        keepCurrentZoomLevel=True,
-        strings={"title": "Track my live location"},
+        position="topleft", drawCircle=True, flyTo=True, keepCurrentZoomLevel=True,
+        strings={"title": "Track my live location"}, auto_start=True,
         locateOptions={"enableHighAccuracy": True, "maximumAge": 0, "timeout": 10000, "watch": True}
+    ).add_to(m)
+    
+    # Add a crosshair to the center of the screen so user knows exactly what coordinate is being captured
+    plugins.FloatImage(
+        "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c5/Crosshair.svg/512px-Crosshair.svg.png",
+        bottom=45, left=45, width=10
     ).add_to(m)
     
     return m
 
 # --- STREAMLIT UI SETUP ---
-st.set_page_config(page_title="Field Trial Grid Generator", layout="centered")
+st.set_page_config(page_title="Field Trial Grid", layout="centered")
 st.title("🌱 Field Trial Grid")
 
 # Initialize Session State
 if 'generated' not in st.session_state: st.session_state.generated = False
-if 'raw_gps_lat' not in st.session_state: st.session_state.raw_gps_lat = None
-if 'raw_gps_lon' not in st.session_state: st.session_state.raw_gps_lon = None
-# Starting default coords 
 if 'p1_lat' not in st.session_state: st.session_state.p1_lat = -25.73300000
 if 'p1_lon' not in st.session_state: st.session_state.p1_lon = -53.05800000
 if 'p2_lat' not in st.session_state: st.session_state.p2_lat = -25.73400000
@@ -97,225 +84,191 @@ if 'p2_lon' not in st.session_state: st.session_state.p2_lon = -53.05800000
 
 
 # ==========================================
-# 1. TOP SECTION: THE MAP (Always visible)
+# 1. TOP SECTION: THE MAP
 # ==========================================
 map_container = st.container()
 
 
 # ==========================================
-# 2. BOTTOM SECTION: CONFIG & CAPTURE
+# 2. BOTTOM SECTION: CAPTURE & CONFIG
 # ==========================================
 st.divider()
-st.subheader("📡 GNSS Capture Hub")
-st.caption("1. Tap 'Get Location' below. 2. Choose which point to save it to.")
+st.subheader("🎯 GNSS Capture")
+st.caption("Let the blue dot align, or drag the map to place the center crosshair on your exact target. Then click save.")
 
-gps_loc = streamlit_geolocation()
-if gps_loc and gps_loc.get('latitude'):
-    st.session_state.raw_gps_lat = float(gps_loc['latitude'])
-    st.session_state.raw_gps_lon = float(gps_loc['longitude'])
-    st.success(f"📍 Signal Acquired: {st.session_state.raw_gps_lat:.6f}, {st.session_state.raw_gps_lon:.6f}")
-    
-    c1, c2 = st.columns(2)
-    if c1.button("Save as Point A (Start)", use_container_width=True):
-        st.session_state.p1_lat = st.session_state.raw_gps_lat
-        st.session_state.p1_lon = st.session_state.raw_gps_lon
-        st.session_state.p2_lat = st.session_state.raw_gps_lat - 0.0001 # Bring P2 near P1 to avoid map zooming out
-        st.session_state.p2_lon = st.session_state.raw_gps_lon
-        st.session_state.generated = False 
-        st.rerun() 
-        
-    if c2.button("Save as Point B (Aim)", use_container_width=True):
-        st.session_state.p2_lat = st.session_state.raw_gps_lat
-        st.session_state.p2_lon = st.session_state.raw_gps_lon
-        st.session_state.generated = False 
-        st.rerun() 
+c1, c2 = st.columns(2)
+btn_a = c1.button("📍 Save Point A (Start)", use_container_width=True)
+btn_b = c2.button("📍 Save Point B (Aim)", use_container_width=True)
 
-# --- Manual Coordinate Inputs ---
-with st.expander("✏️ Manual Coordinate Edit (Optional)", expanded=False):
-    input_format = st.radio("Format", ["Decimal Degrees (DD)", "GMS (Single Smart Field)"])
-    
-    if input_format == "Decimal Degrees (DD)":
-        st.write("**Point A (Start)**")
-        lat1_dd = st.number_input("A Lat (DD)", value=st.session_state.p1_lat, format="%.8f")
-        lon1_dd = st.number_input("A Lon (DD)", value=st.session_state.p1_lon, format="%.8f")
-        st.write("**Point B (Direction)**")
-        lat2_dd = st.number_input("B Lat (DD)", value=st.session_state.p2_lat, format="%.8f")
-        lon2_dd = st.number_input("B Lon (DD)", value=st.session_state.p2_lon, format="%.8f")
-        
-    elif input_format == "GMS (Single Smart Field)":
-        st.write("**Point A (Start)**")
-        lat1_smart = st.text_input("A Lat", value="25 43 58.8 S")
-        lon1_smart = st.text_input("A Lon", value="53 03 28.8 W")
-        st.write("**Point B (Direction)**")
-        lat2_smart = st.text_input("B Lat", value="25 44 02.4 S")
-        lon2_smart = st.text_input("B Lon", value="53 03 28.8 W")
+# Expanders for clean mobile view
+with st.expander("✏️ Manual Coordinate Edit", expanded=False):
+    st.write("**Point A (Start)**")
+    lat1_dd = st.number_input("A Lat (DD)", value=st.session_state.p1_lat, format="%.8f")
+    lon1_dd = st.number_input("A Lon (DD)", value=st.session_state.p1_lon, format="%.8f")
+    st.write("**Point B (Direction)**")
+    lat2_dd = st.number_input("B Lat (DD)", value=st.session_state.p2_lat, format="%.8f")
+    lon2_dd = st.number_input("B Lon (DD)", value=st.session_state.p2_lon, format="%.8f")
 
-# Extract final coordinates based on format
-try:
-    if input_format == "Decimal Degrees (DD)":
-        cur_lat1, cur_lon1, cur_lat2, cur_lon2 = lat1_dd, lon1_dd, lat2_dd, lon2_dd
-    elif input_format == "GMS (Single Smart Field)":
-        cur_lat1 = parse_coordinate(lat1_smart, input_format)
-        cur_lon1 = parse_coordinate(lon1_smart, input_format)
-        cur_lat2 = parse_coordinate(lat2_smart, input_format)
-        cur_lon2 = parse_coordinate(lon2_smart, input_format)
-except Exception:
-    cur_lat1, cur_lon1 = st.session_state.p1_lat, st.session_state.p1_lon
-    cur_lat2, cur_lon2 = st.session_state.p2_lat, st.session_state.p2_lon
-
-# --- Grid Configuration ---
 with st.expander("📐 Grid Dimensions", expanded=True):
-    c1, c2 = st.columns(2)
-    rows = c1.number_input("Rows", min_value=1, value=10, step=1)
-    cols = c2.number_input("Columns", min_value=1, value=4, step=1)
-    c3, c4 = st.columns(2)
-    plot_len = c3.number_input("Length (m)", min_value=0.1, value=5.0, step=0.5)
-    plot_wid = c4.number_input("Width (m)", min_value=0.1, value=2.0, step=0.5)
-
-# --- Export Configuration ---
-with st.expander("💾 Export Options", expanded=False):
-    kml_polygons = st.checkbox("KML: Include Polygons", value=True)
-    kml_centroids = st.checkbox("KML: Include Centroids", value=False)
-    kml_corners = st.checkbox("KML: Include Corners", value=False)
-    excel_coord_format = st.radio("Excel Format", ["Decimal Degrees (DD)", "Degrees, Minutes, Seconds (GMS)"])
+    col1, col2 = st.columns(2)
+    rows = col1.number_input("Rows", min_value=1, value=10, step=1)
+    cols = col2.number_input("Columns", min_value=1, value=4, step=1)
+    col3, col4 = st.columns(2)
+    plot_len = col3.number_input("Length (m)", min_value=0.1, value=5.0, step=0.5)
+    plot_wid = col4.number_input("Width (m)", min_value=0.1, value=2.0, step=0.5)
 
 st.divider()
 
 if st.button("🚀 GENERATE FIELD GRID", type="primary", use_container_width=True):
+    # Ensure manual changes sync before generation
+    st.session_state.p1_lat, st.session_state.p1_lon = lat1_dd, lon1_dd
+    st.session_state.p2_lat, st.session_state.p2_lon = lat2_dd, lon2_dd
     st.session_state.generated = True
+    st.rerun()
 
 
 # ==========================================
-# 3. MAP RENDERING LOGIC (Rendered inside Top Container)
+# 3. MAP RENDERING & LOGIC
 # ==========================================
 with map_container:
     if not st.session_state.generated:
-        st.info("Align your points. The map will digitally stretch if you zoom in close.")
         m_live = get_base_map()
         
-        # Draw Points
-        folium.PolyLine([(cur_lat1, cur_lon1), (cur_lat2, cur_lon2)], color="yellow", weight=4, opacity=0.9).add_to(m_live)
-        folium.Marker([cur_lat1, cur_lon1], tooltip="Point A (Start)", icon=folium.Icon(color="green")).add_to(m_live)
-        folium.Marker([cur_lat2, cur_lon2], tooltip="Point B (Aim)", icon=folium.Icon(color="red")).add_to(m_live)
+        folium.PolyLine([(st.session_state.p1_lat, st.session_state.p1_lon), (st.session_state.p2_lat, st.session_state.p2_lon)], color="yellow", weight=4).add_to(m_live)
+        folium.Marker([st.session_state.p1_lat, st.session_state.p1_lon], tooltip="Point A", icon=folium.Icon(color="green")).add_to(m_live)
+        folium.Marker([st.session_state.p2_lat, st.session_state.p2_lon], tooltip="Point B", icon=folium.Icon(color="red")).add_to(m_live)
 
-        # Fit bounds slightly padded
-        sw = (min(cur_lat1, cur_lat2), min(cur_lon1, cur_lon2))
-        ne = (max(cur_lat1, cur_lat2), max(cur_lon1, cur_lon2))
-        buffer = 0.00005 
-        m_live.fit_bounds([(sw[0]-buffer, sw[1]-buffer), (ne[0]+buffer, ne[1]+buffer)])
+        # Retrieve the center of the map from Python (Updates when map is dragged or live GPS moves)
+        map_data = st_folium(m_live, use_container_width=True, height=450, returned_objects=["center"])
 
-        st_folium(m_live, use_container_width=True, height=450, returned_objects=[])
+        # Capture Logic
+        if btn_a and map_data and "center" in map_data:
+            st.session_state.p1_lat = map_data["center"]["lat"]
+            st.session_state.p1_lon = map_data["center"]["lng"]
+            # Bring P2 close to P1 so the map doesn't zoom out across the world
+            st.session_state.p2_lat = st.session_state.p1_lat - 0.0001
+            st.session_state.p2_lon = st.session_state.p1_lon
+            st.rerun()
+            
+        if btn_b and map_data and "center" in map_data:
+            st.session_state.p2_lat = map_data["center"]["lat"]
+            st.session_state.p2_lon = map_data["center"]["lng"]
+            st.rerun()
 
     else:
-        try:
-            start_point = (cur_lat1, cur_lon1)
-            bearing = calculate_bearing(cur_lat1, cur_lon1, cur_lat2, cur_lon2)
-            bearing_perp = (bearing + 90) % 360
-            
-            plot_data = []
-            for r in range(rows):
-                for c in range(cols):
-                    dist_down = r * plot_len
-                    dist_across = c * plot_wid
-                    
-                    pt1 = move_point(move_point(start_point, bearing, dist_down), bearing_perp, dist_across)
-                    pt2 = move_point(pt1, bearing, plot_len)
-                    pt3 = move_point(pt2, bearing_perp, plot_wid)
-                    pt4 = move_point(pt1, bearing_perp, plot_wid)
-                    
-                    plot_data.append({
-                        "Plot_ID": f"{c+1}{(r+1):02d}",
-                        "Row": r + 1, "Col": c + 1, "Corners_DD": [pt1, pt2, pt3, pt4]
-                    })
-
-            grid_tl = start_point
-            grid_bl = move_point(start_point, bearing, rows * plot_len)
-            grid_br = move_point(grid_bl, bearing_perp, cols * plot_wid)
-            grid_tr = move_point(start_point, bearing_perp, cols * plot_wid)
-            outside_corners = [grid_tl, grid_bl, grid_br, grid_tr]
-
-            st.success("✅ Grid Generated Successfully!")
-            m_grid = get_base_map()
-
-            folium.PolyLine([(cur_lat1, cur_lon1), (cur_lat2, cur_lon2)], color="yellow", weight=4).add_to(m_grid)
-
-            for plot in plot_data:
-                coords = plot["Corners_DD"].copy()
-                coords.append(coords[0]) 
-                folium.Polygon(
-                    locations=coords, color="white", weight=1, fill=True,
-                    fill_color="green", fill_opacity=0.3, tooltip=f"Plot {plot['Plot_ID']}"
-                ).add_to(m_grid)
-
-            sw = (min([lat for lat, lon in outside_corners]), min([lon for lat, lon in outside_corners]))
-            ne = (max([lat for lat, lon in outside_corners]), max([lon for lat, lon in outside_corners]))
-            m_grid.fit_bounds([sw, ne])
-
-            st_folium(m_grid, use_container_width=True, height=450, returned_objects=[])
-
-            # --- GENERATE EXPORT FILES ---
-            is_dd = (excel_coord_format == "Decimal Degrees (DD)")
-            excel_rows_plots = []
-            for p in plot_data:
-                row_dict = {"Plot_ID": p["Plot_ID"], "Row": p["Row"], "Col": p["Col"]}
-                for i, (lat, lon) in enumerate(p["Corners_DD"]):
-                    if is_dd:
-                        row_dict[f"Corner_{i+1}_Lat"], row_dict[f"Corner_{i+1}_Lon"] = lat, lon
-                    else:
-                        row_dict[f"Corner_{i+1}_GMS"] = f"{dd_to_dms(lat, True)} {dd_to_dms(lon, False)}"
-                c_lat, c_lon = get_centroid(p["Corners_DD"])
-                if is_dd:
-                    row_dict["Centroid_Lat"], row_dict["Centroid_Lon"] = c_lat, c_lon
-                else:
-                    row_dict["Centroid_GMS"] = f"{dd_to_dms(c_lat, True)} {dd_to_dms(c_lon, False)}"
-                excel_rows_plots.append(row_dict)
+        # Generate Grid Data
+        start_point = (st.session_state.p1_lat, st.session_state.p1_lon)
+        bearing = calculate_bearing(st.session_state.p1_lat, st.session_state.p1_lon, st.session_state.p2_lat, st.session_state.p2_lon)
+        bearing_perp = (bearing + 90) % 360
+        
+        plot_data = []
+        for r in range(rows):
+            for c in range(cols):
+                dist_down = r * plot_len
+                dist_across = c * plot_wid
                 
-            df_plots = pd.DataFrame(excel_rows_plots)
-            
-            excel_rows_outside = []
-            corner_labels = ["Start (P1)", "Bottom-Left", "Bottom-Right", "Top-Right"]
-            for label, (lat, lon) in zip(corner_labels, outside_corners):
-                row_dict = {"Corner": label}
-                if is_dd:
-                    row_dict["Lat"], row_dict["Lon"] = lat, lon
-                else:
-                    row_dict["Coordinates_GMS"] = f"{dd_to_dms(lat, True)} {dd_to_dms(lon, False)}"
-                excel_rows_outside.append(row_dict)
+                pt1 = move_point(move_point(start_point, bearing, dist_down), bearing_perp, dist_across) # Bottom-Left
+                pt2 = move_point(pt1, bearing, plot_len) # Top-Left
+                pt3 = move_point(pt2, bearing_perp, plot_wid) # Top-Right
+                pt4 = move_point(pt1, bearing_perp, plot_wid) # Bottom-Right
                 
-            df_outside = pd.DataFrame(excel_rows_outside)
+                plot_data.append({
+                    "Plot_ID": f"{c+1}{(r+1):02d}", "Row": r + 1, "Col": c + 1,
+                    "Corners_DD": [pt1, pt2, pt3, pt4]
+                })
 
-            excel_buffer = io.BytesIO()
-            with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
-                df_plots.to_excel(writer, index=False, sheet_name='Plot Coordinates')
-                df_outside.to_excel(writer, index=False, sheet_name='Outside Boundaries')
-            excel_buffer.seek(0)
+        # Render Final Map
+        st.success("✅ Grid Generated Successfully!")
+        m_grid = get_base_map(center_lat=start_point[0], center_lon=start_point[1], zoom=20)
+        
+        for plot in plot_data:
+            coords = plot["Corners_DD"].copy()
+            coords.append(coords[0]) 
+            folium.Polygon(
+                locations=coords, color="white", weight=1, fill=True,
+                fill_color="green", fill_opacity=0.3, tooltip=f"Plot {plot['Plot_ID']}"
+            ).add_to(m_grid)
 
-            kml = simplekml.Kml()
-            for p in plot_data:
-                if kml_polygons:
-                    kml_coords = [(lon, lat) for lat, lon in p["Corners_DD"]]
-                    kml_coords.append(kml_coords[0]) 
-                    pol = kml.newpolygon(name=p["Plot_ID"], outerboundaryis=kml_coords)
-                    pol.style.polystyle.color = simplekml.Color.changealphaint(100, simplekml.Color.green)
-                    pol.style.linestyle.color = simplekml.Color.white
+        st_folium(m_grid, use_container_width=True, height=450, returned_objects=[])
 
-                if kml_centroids:
-                    c_lat, c_lon = get_centroid(p["Corners_DD"])
-                    pnt = kml.newpoint(name=f"{p['Plot_ID']}_Centroid", coords=[(c_lon, c_lat)])
-                    pnt.style.iconstyle.icon.href = 'http://maps.google.com/mapfiles/kml/shapes/target.png'
+        # ==========================================
+        # 4. EXPORT LOGIC (Serpentine, KML, GeoJSON, Shapefile)
+        # ==========================================
+        st.subheader("💾 Download Formats")
+        
+        # 1. GENERATE SERPENTINE STAKEOUT (Emlid Flow ready)
+        stake_points = []
+        stake_id = 1
+        for r in range(rows):
+            # Alternate columns direction based on row for serpentine path
+            col_sequence = range(cols) if r % 2 == 0 else reversed(range(cols))
+            for c in col_sequence:
+                p = next(plot for plot in plot_data if plot["Row"] == r+1 and plot["Col"] == c+1)
+                bl_lat, bl_lon = p["Corners_DD"][0] # Always stake Bottom-Left
+                stake_points.append({
+                    "Stake_ID": f"S{stake_id:03d}",
+                    "Plot_ID": p["Plot_ID"],
+                    "Lat": bl_lat, "Lon": bl_lon
+                })
+                stake_id += 1
 
-                if kml_corners:
-                    for i, (lat, lon) in enumerate(p["Corners_DD"]):
-                        pnt = kml.newpoint(name=f"{p['Plot_ID']}_C{i+1}", coords=[(lon, lat)])
-                        pnt.style.iconstyle.icon.href = 'http://maps.google.com/mapfiles/kml/shapes/placemark_square.png'
+        # 2. CREATE KML
+        kml = simplekml.Kml()
+        # Polygons
+        fold_poly = kml.newfolder(name="Plots")
+        for p in plot_data:
+            coords = [(lon, lat) for lat, lon in p["Corners_DD"]]
+            coords.append(coords[0])
+            pol = fold_poly.newpolygon(name=p["Plot_ID"], outerboundaryis=coords)
+            pol.style.polystyle.color = simplekml.Color.changealphaint(100, simplekml.Color.green)
+        
+        # Serpentine Waypoints
+        fold_stakes = kml.newfolder(name="Serpentine Stakeout")
+        for st_pt in stake_points:
+            pnt = fold_stakes.newpoint(name=st_pt["Stake_ID"], description=f"Plot {st_pt['Plot_ID']} BL", coords=[(st_pt["Lon"], st_pt["Lat"])])
+            pnt.style.iconstyle.icon.href = 'http://maps.google.com/mapfiles/kml/shapes/placemark_square.png'
+        kml_string = kml.kml()
 
-            kml_string = kml.kml()
+        # 3. CREATE GEOJSON
+        features = []
+        for p in plot_data:
+            coords = [[lon, lat] for lat, lon in p["Corners_DD"]]
+            coords.append(coords[0]) # Close poly
+            features.append({
+                "type": "Feature",
+                "properties": {"Plot_ID": p["Plot_ID"], "Row": p["Row"], "Col": p["Col"]},
+                "geometry": {"type": "Polygon", "coordinates": [coords]}
+            })
+        geojson_str = json.dumps({"type": "FeatureCollection", "features": features})
 
-            c1, c2 = st.columns(2)
-            with c1:
-                st.download_button("📄 Download KML", data=kml_string, file_name="field_trial_grid.kml", mime="application/vnd.google-earth.kml+xml", use_container_width=True)
-            with c2:
-                st.download_button("📊 Download Excel", data=excel_buffer, file_name="field_trial_coordinates.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+        # Render Buttons
+        dl_col1, dl_col2 = st.columns(2)
+        with dl_col1:
+            st.download_button("📥 KML (Polygons + Serpentine)", data=kml_string, file_name="field_grid.kml", mime="application/vnd.google-earth.kml+xml", use_container_width=True)
+        with dl_col2:
+            st.download_button("📥 GeoJSON", data=geojson_str, file_name="field_grid.geojson", mime="application/geo+json", use_container_width=True)
 
-        except Exception as e:
-            st.error(f"⚠️ Error: {e}")
+        # 4. CREATE SHAPEFILE (Requires GeoPandas)
+        if HAS_GPD:
+            try:
+                gdf = gpd.GeoDataFrame.from_features(json.loads(geojson_str)["features"])
+                gdf.set_crs(epsg=4326, inplace=True)
+                
+                shp_io = io.BytesIO()
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    gdf.to_file(os.path.join(tmpdir, "field_grid.shp"))
+                    with zipfile.ZipFile(shp_io, 'w') as zipf:
+                        for filename in os.listdir(tmpdir):
+                            zipf.write(os.path.join(tmpdir, filename), filename)
+                shp_io.seek(0)
+                
+                st.download_button("📥 Shapefile (ZIP)", data=shp_io, file_name="field_grid_shapefile.zip", mime="application/zip", use_container_width=True)
+            except Exception as e:
+                st.error(f"Shapefile generation error: {e}")
+        else:
+            st.info("💡 To enable Shapefile exports, add `geopandas` to your requirements.txt")
+
+        # Back button
+        if st.button("🔙 Adjust Grid", use_container_width=True):
+            st.session_state.generated = False
+            st.rerun()
