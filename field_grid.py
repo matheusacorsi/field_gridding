@@ -106,10 +106,11 @@ if 'cols' not in st.session_state: st.session_state.cols = 4
 if 'plot_len' not in st.session_state: st.session_state.plot_len = 5.0
 if 'plot_wid' not in st.session_state: st.session_state.plot_wid = 2.0
 
-if 'p1_lat' not in st.session_state: st.session_state.p1_lat = -22.4471995785483
-if 'p1_lon' not in st.session_state: st.session_state.p1_lon = -47.07321466883996
-if 'p2_lat' not in st.session_state: st.session_state.p2_lat = -22.4481995785483 
-if 'p2_lon' not in st.session_state: st.session_state.p2_lon = -47.07321466883996
+# Initial default coordinates set to 7 decimal precision
+if 'p1_lat' not in st.session_state: st.session_state.p1_lat = -22.4471996
+if 'p1_lon' not in st.session_state: st.session_state.p1_lon = -47.0732147
+if 'p2_lat' not in st.session_state: st.session_state.p2_lat = -22.4481996 
+if 'p2_lon' not in st.session_state: st.session_state.p2_lon = -47.0732147
 
 
 # ==========================================
@@ -130,7 +131,6 @@ if not st.session_state.generated:
         st.info("Swipe to Emlid Flow, tap your coordinates to copy them, and paste below.")
         
         c1, c2 = st.columns(2)
-        # Using text_area allows pasting multi-line strings easily on mobile
         paste_a = c1.text_area("📍 Paste Point A (Start) here:", height=68)
         paste_b = c2.text_area("📍 Paste Point B (Aim) here:", height=68)
         
@@ -140,7 +140,7 @@ if not st.session_state.generated:
                 st.session_state.p1_lat = lat_a
                 st.session_state.p1_lon = lon_a
                 st.session_state.p1_saved = True
-                c1.success(f"Saved: {lat_a:.6f}, {lon_a:.6f}")
+                c1.success(f"Saved: {lat_a:.7f}, {lon_a:.7f}")
             else:
                 c1.error("Could not find coordinates in text.")
                 
@@ -150,7 +150,7 @@ if not st.session_state.generated:
                 st.session_state.p2_lat = lat_b
                 st.session_state.p2_lon = lon_b
                 st.session_state.p2_saved = True
-                c2.success(f"Saved: {lat_b:.6f}, {lon_b:.6f}")
+                c2.success(f"Saved: {lat_b:.7f}, {lon_b:.7f}")
             else:
                 c2.error("Could not find coordinates in text.")
                 
@@ -189,6 +189,21 @@ if not st.session_state.generated:
         col3, col4 = st.columns(2)
         st.session_state.plot_len = col3.number_input("Length (m)", min_value=0.1, value=st.session_state.plot_len, step=0.5)
         st.session_state.plot_wid = col4.number_input("Width (m)", min_value=0.1, value=st.session_state.plot_wid, step=0.5)
+
+    # Manual Coordinate View/Edit
+    with st.expander("✏️ View/Edit Coordinates", expanded=False):
+        st.write("Verify or manually adjust your 7-decimal RTK coordinates.")
+        new_p1_lat = st.number_input("Point A Lat (DD)", value=st.session_state.p1_lat, format="%.7f")
+        new_p1_lon = st.number_input("Point A Lon (DD)", value=st.session_state.p1_lon, format="%.7f")
+        new_p2_lat = st.number_input("Point B Lat (DD)", value=st.session_state.p2_lat, format="%.7f")
+        new_p2_lon = st.number_input("Point B Lon (DD)", value=st.session_state.p2_lon, format="%.7f")
+        
+        if st.button("Apply Manual Edit", use_container_width=True):
+            st.session_state.p1_lat, st.session_state.p1_lon = new_p1_lat, new_p1_lon
+            st.session_state.p2_lat, st.session_state.p2_lon = new_p2_lat, new_p2_lon
+            st.session_state.p1_saved = True
+            st.session_state.p2_saved = True
+            st.rerun()
 
     st.divider()
 
