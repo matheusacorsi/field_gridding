@@ -1,6 +1,7 @@
 streamlit
 pandas
-geopy
 simplekml
+geopy
 plotly
 openpyxl
+streamlit-geolocation
