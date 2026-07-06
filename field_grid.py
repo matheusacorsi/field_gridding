@@ -6,6 +6,7 @@ import io
 import re
 from geopy.distance import geodesic
 import plotly.graph_objects as go
+from streamlit_geolocation import streamlit_geolocation
 
 # --- HELPER FUNCTIONS ---
 def dms_to_dd(deg, min, sec, direction):
@@ -85,6 +86,12 @@ st.write("Generate a field trial grid from a starting coordinate and an alignmen
 if 'generated' not in st.session_state:
     st.session_state.generated = False
 
+# Initialize Session State for GPS Coordinates
+if 'p1_lat' not in st.session_state: st.session_state.p1_lat = -25.73300000
+if 'p1_lon' not in st.session_state: st.session_state.p1_lon = -53.05800000
+if 'p2_lat' not in st.session_state: st.session_state.p2_lat = -25.73400000
+if 'p2_lon' not in st.session_state: st.session_state.p2_lon = -53.05800000
+
 # Sidebar Inputs
 with st.sidebar:
     st.header("1. Input Coordinates")
@@ -96,15 +103,30 @@ with st.sidebar:
     
     st.write("---")
     
-    # OPTION 1: Decimal Degrees
+    # OPTION 1: Decimal Degrees (With GPS Integration)
     if input_format == "Decimal Degrees (DD)":
         st.write("**First Plot Outside Corner (P1)**")
-        lat1_dd = st.number_input("P1 Latitude (DD)", value=-25.733000, format="%.6f")
-        lon1_dd = st.number_input("P1 Longitude (DD)", value=-53.058000, format="%.6f")
         
+        # Geolocation Button for P1
+        p1_loc = streamlit_geolocation(key="p1_geo")
+        if p1_loc and p1_loc.get('latitude'):
+            st.session_state.p1_lat = p1_loc['latitude']
+            st.session_state.p1_lon = p1_loc['longitude']
+            
+        lat1_dd = st.number_input("P1 Latitude (DD)", value=st.session_state.p1_lat, format="%.8f")
+        lon1_dd = st.number_input("P1 Longitude (DD)", value=st.session_state.p1_lon, format="%.8f")
+        
+        st.write("---")
         st.write("**Alignment Point (P2)**")
-        lat2_dd = st.number_input("P2 Latitude (DD)", value=-25.734000, format="%.6f")
-        lon2_dd = st.number_input("P2 Longitude (DD)", value=-53.058000, format="%.6f")
+        
+        # Geolocation Button for P2
+        p2_loc = streamlit_geolocation(key="p2_geo")
+        if p2_loc and p2_loc.get('latitude'):
+            st.session_state.p2_lat = p2_loc['latitude']
+            st.session_state.p2_lon = p2_loc['longitude']
+            
+        lat2_dd = st.number_input("P2 Latitude (DD)", value=st.session_state.p2_lat, format="%.8f")
+        lon2_dd = st.number_input("P2 Longitude (DD)", value=st.session_state.p2_lon, format="%.8f")
         
     # OPTION 2: Single Smart Field
     elif input_format == "GMS (Single Smart Field)":
@@ -218,7 +240,7 @@ if st.session_state.generated:
         # --- PLOTLY MAP VISUALIZATION ---
         st.subheader("Plotly Mapbox Satellite View")
         
-        mapbox_token = st.secrets["MAPBOX_TOKEN"]
+        mapbox_token = st.secrets.get("MAPBOX_TOKEN", "")
         fig = go.Figure()
 
         fig.add_trace(go.Scattermapbox(
@@ -246,18 +268,28 @@ if st.session_state.generated:
                 hoverinfo="text"
             ))
 
-        fig.update_layout(
-            mapbox=dict(
-                accesstoken=mapbox_token,
-                style="satellite",
-                center=dict(lat=lat1, lon=lon1),
-                zoom=19 
-            ),
+        # Check if Mapbox token exists, fallback to open-source map if not
+        layout_args = dict(
             margin=dict(l=0, r=0, t=0, b=0),
             height=600,
             showlegend=False
         )
         
+        if mapbox_token:
+            layout_args["mapbox"] = dict(
+                accesstoken=mapbox_token,
+                style="satellite",
+                center=dict(lat=lat1, lon=lon1),
+                zoom=19 
+            )
+        else:
+            layout_args["mapbox"] = dict(
+                style="open-street-map",
+                center=dict(lat=lat1, lon=lon1),
+                zoom=19 
+            )
+
+        fig.update_layout(**layout_args)
         st.plotly_chart(fig, use_container_width=True)
 
         # --- EXCEL GENERATION ---
