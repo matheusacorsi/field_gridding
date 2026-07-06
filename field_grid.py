@@ -76,7 +76,7 @@ if 'plot_wid' not in st.session_state: st.session_state.plot_wid = 2.0
 # Starting Default Location 
 if 'p1_lat' not in st.session_state: st.session_state.p1_lat = -22.4471995785483
 if 'p1_lon' not in st.session_state: st.session_state.p1_lon = -47.07321466883996
-if 'p2_lat' not in st.session_state: st.session_state.p2_lat = -22.4481995785483 # Slightly offset for alignment vector
+if 'p2_lat' not in st.session_state: st.session_state.p2_lat = -22.4481995785483 
 if 'p2_lon' not in st.session_state: st.session_state.p2_lon = -47.07321466883996
 
 
@@ -237,6 +237,12 @@ with map_container:
         # --- EXPORT LOGIC ---
         st.subheader("💾 Download Formats")
         
+        # UI Toggles for KML Content
+        st.write("**KML Options:**")
+        opt_col1, opt_col2 = st.columns(2)
+        kml_export_polygons = opt_col1.checkbox("Include Polygons", value=True)
+        kml_export_waypoints = opt_col2.checkbox("Include Serpentine Waypoints", value=True)
+        
         # 1. Serpentine Stakeout Routing (For Emlid Flow)
         stake_points = []
         stake_id = 1
@@ -248,20 +254,34 @@ with map_container:
                 stake_points.append({"Stake_ID": f"S{stake_id:03d}", "Plot_ID": p["Plot_ID"], "Lat": bl_lat, "Lon": bl_lon})
                 stake_id += 1
 
-        # 2. KML File Generation
+        # 2. KML File Generation (Conditional based on user checkboxes)
         kml = simplekml.Kml()
-        fold_poly = kml.newfolder(name="Plots")
-        for p in plot_data:
-            coords = [(lon, lat) for lat, lon in p["Corners_DD"]]
-            coords.append(coords[0])
-            pol = fold_poly.newpolygon(name=p["Plot_ID"], outerboundaryis=coords)
-            pol.style.polystyle.color = simplekml.Color.changealphaint(100, simplekml.Color.green)
         
-        fold_stakes = kml.newfolder(name="Serpentine Stakeout")
-        for st_pt in stake_points:
-            pnt = fold_stakes.newpoint(name=st_pt["Stake_ID"], description=f"Plot {st_pt['Plot_ID']} BL", coords=[(st_pt["Lon"], st_pt["Lat"])])
-            pnt.style.iconstyle.icon.href = 'http://maps.google.com/mapfiles/kml/shapes/placemark_square.png'
+        if kml_export_polygons:
+            fold_poly = kml.newfolder(name="Plots")
+            for p in plot_data:
+                coords = [(lon, lat) for lat, lon in p["Corners_DD"]]
+                coords.append(coords[0])
+                pol = fold_poly.newpolygon(name=p["Plot_ID"], outerboundaryis=coords)
+                pol.style.polystyle.color = simplekml.Color.changealphaint(100, simplekml.Color.green)
+        
+        if kml_export_waypoints:
+            fold_stakes = kml.newfolder(name="Serpentine Stakeout")
+            for st_pt in stake_points:
+                pnt = fold_stakes.newpoint(name=st_pt["Stake_ID"], description=f"Plot {st_pt['Plot_ID']} BL", coords=[(st_pt["Lon"], st_pt["Lat"])])
+                pnt.style.iconstyle.icon.href = 'http://maps.google.com/mapfiles/kml/shapes/placemark_square.png'
+                
         kml_string = kml.kml()
+
+        # Dynamic KML Button Label
+        if kml_export_polygons and kml_export_waypoints:
+            kml_label = "📥 KML (Polygons & Waypoints)"
+        elif kml_export_polygons:
+            kml_label = "📥 KML (Polygons Only)"
+        elif kml_export_waypoints:
+            kml_label = "📥 KML (Waypoints Only)"
+        else:
+            kml_label = "📥 KML (Empty)"
 
         # 3. GeoJSON Generation
         features = []
@@ -274,7 +294,7 @@ with map_container:
         # 4. Render Buttons
         dl_col1, dl_col2 = st.columns(2)
         with dl_col1:
-            st.download_button("📥 KML (Polygons & Serpentine)", data=kml_string, file_name="field_grid.kml", mime="application/vnd.google-earth.kml+xml", use_container_width=True)
+            st.download_button(kml_label, data=kml_string, file_name="field_grid.kml", mime="application/vnd.google-earth.kml+xml", use_container_width=True, disabled=not(kml_export_polygons or kml_export_waypoints))
         with dl_col2:
             st.download_button("📥 GeoJSON File", data=geojson_str, file_name="field_grid.geojson", mime="application/geo+json", use_container_width=True)
 
