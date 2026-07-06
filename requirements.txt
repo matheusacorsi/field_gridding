@@ -2,6 +2,7 @@ streamlit
 pandas
 simplekml
 geopy
-plotly
+folium
+streamlit-folium
 openpyxl
 streamlit-geolocation
