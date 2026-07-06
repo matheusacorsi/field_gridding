@@ -285,8 +285,9 @@ with map_container:
         st.write("**KML Options:**")
         opt_col1, opt_col2 = st.columns(2)
         kml_export_polygons = opt_col1.checkbox("Include Polygons", value=True)
-        kml_export_waypoints = opt_col2.checkbox("Include Serpentine Waypoints", value=True)
+        kml_export_waypoints = opt_col2.checkbox("Include Serpentine Waypoints", value=False)
         
+        # 1. Serpentine Stakeout Routing
         stake_points = []
         stake_id = 1
         for r in range(st.session_state.rows):
@@ -294,12 +295,23 @@ with map_container:
             for c in col_sequence:
                 p = next(plot for plot in plot_data if plot["Row"] == r+1 and plot["Col"] == c+1)
                 bl_lat, bl_lon = p["Corners_DD"][0] 
-                # Updated ID generation: Just the number as a string (1, 2, 3...)
-                stake_points.append({"Stake_ID": f"{stake_id}", "Plot_ID": p["Plot_ID"], "Lat": bl_lat, "Lon": bl_lon})
+                # FIX: 3-digit zero-padded number for perfect alphabetical sorting in KMLs (001, 002... 010)
+                stake_points.append({"Stake_ID": f"{stake_id:03d}", "Plot_ID": p["Plot_ID"], "Lat": bl_lat, "Lon": bl_lon})
                 stake_id += 1
 
+        # 2. Emlid Flow Native CSV (For Staking)
+        emlid_csv_data = []
+        for st_pt in stake_points:
+            emlid_csv_data.append({
+                "name": st_pt["Stake_ID"],
+                "longitude": st_pt["Lon"],
+                "latitude": st_pt["Lat"],
+                "elevation": 0.000
+            })
+        emlid_csv_str = pd.DataFrame(emlid_csv_data).to_csv(index=False)
+
+        # 3. KML Generation
         kml = simplekml.Kml()
-        
         if kml_export_polygons:
             fold_poly = kml.newfolder(name="Plots")
             for p in plot_data:
@@ -316,6 +328,7 @@ with map_container:
                 
         kml_string = kml.kml()
 
+        # Dynamic KML Label
         if kml_export_polygons and kml_export_waypoints:
             kml_label = "📥 KML (Polygons & Waypoints)"
         elif kml_export_polygons:
@@ -325,6 +338,7 @@ with map_container:
         else:
             kml_label = "📥 KML (Empty)"
 
+        # 4. GeoJSON Generation
         features = []
         for p in plot_data:
             coords = [[lon, lat] for lat, lon in p["Corners_DD"]]
@@ -332,27 +346,30 @@ with map_container:
             features.append({"type": "Feature", "properties": {"Plot_ID": p["Plot_ID"], "Row": p["Row"], "Col": p["Col"]}, "geometry": {"type": "Polygon", "coordinates": [coords]}})
         geojson_str = json.dumps({"type": "FeatureCollection", "features": features})
 
+        # 5. Render Download Buttons
         dl_col1, dl_col2 = st.columns(2)
         with dl_col1:
             st.download_button(kml_label, data=kml_string, file_name="field_grid.kml", mime="application/vnd.google-earth.kml+xml", use_container_width=True, disabled=not(kml_export_polygons or kml_export_waypoints))
+            st.download_button("📥 Emlid Flow CSV (Staking)", data=emlid_csv_str, file_name="emlid_stakeout.csv", mime="text/csv", use_container_width=True)
         with dl_col2:
             st.download_button("📥 GeoJSON File", data=geojson_str, file_name="field_grid.geojson", mime="application/geo+json", use_container_width=True)
-
-        if HAS_GPD:
-            try:
-                gdf = gpd.GeoDataFrame.from_features(json.loads(geojson_str)["features"])
-                gdf.set_crs(epsg=4326, inplace=True)
-                
-                shp_io = io.BytesIO()
-                with tempfile.TemporaryDirectory() as tmpdir:
-                    gdf.to_file(os.path.join(tmpdir, "field_grid.shp"))
-                    with zipfile.ZipFile(shp_io, 'w') as zipf:
-                        for filename in os.listdir(tmpdir):
-                            zipf.write(os.path.join(tmpdir, filename), filename)
-                shp_io.seek(0)
-                st.download_button("📥 Shapefile (ZIP format)", data=shp_io, file_name="field_grid_shapefile.zip", mime="application/zip", use_container_width=True)
-            except Exception as e:
-                st.error(f"Shapefile generation error: {e}")
+            if HAS_GPD:
+                try:
+                    gdf = gpd.GeoDataFrame.from_features(json.loads(geojson_str)["features"])
+                    gdf.set_crs(epsg=4326, inplace=True)
+                    
+                    shp_io = io.BytesIO()
+                    with tempfile.TemporaryDirectory() as tmpdir:
+                        gdf.to_file(os.path.join(tmpdir, "field_grid.shp"))
+                        with zipfile.ZipFile(shp_io, 'w') as zipf:
+                            for filename in os.listdir(tmpdir):
+                                zipf.write(os.path.join(tmpdir, filename), filename)
+                    shp_io.seek(0)
+                    st.download_button("📥 Shapefile (ZIP format)", data=shp_io, file_name="field_grid_shapefile.zip", mime="application/zip", use_container_width=True)
+                except Exception as e:
+                    st.error(f"Shapefile generation error: {e}")
+            else:
+                st.info("💡 Tip: Add `geopandas` to requirements.txt for Shapefiles.")
 
         st.write("---")
         if st.button("🔙 Adjust Grid Settings", use_container_width=True):
