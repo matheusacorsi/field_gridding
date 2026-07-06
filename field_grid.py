@@ -103,28 +103,33 @@ with st.sidebar:
     
     st.write("---")
     
-    # OPTION 1: Decimal Degrees (With GPS Integration)
+    # OPTION 1: Decimal Degrees (With Fixed Single GPS Integration)
     if input_format == "Decimal Degrees (DD)":
-        st.write("**First Plot Outside Corner (P1)**")
         
-        # Geolocation Button for P1
-        p1_loc = streamlit_geolocation(key="p1_geo")
-        if p1_loc and p1_loc.get('latitude'):
-            st.session_state.p1_lat = p1_loc['latitude']
-            st.session_state.p1_lon = p1_loc['longitude']
-            
+        st.subheader("🛰️ RTK GPS Capture")
+        st.caption("Click to get your location, then assign it to a point.")
+        
+        # Single instance of the geolocation widget (removes the TypeError)
+        gps_loc = streamlit_geolocation()
+        
+        # If the widget returns a valid location, show assignment buttons
+        if gps_loc and gps_loc.get('latitude'):
+            st.success("📍 Location Acquired!")
+            c1, c2 = st.columns(2)
+            if c1.button("Set as P1"):
+                st.session_state.p1_lat = gps_loc['latitude']
+                st.session_state.p1_lon = gps_loc['longitude']
+            if c2.button("Set as P2"):
+                st.session_state.p2_lat = gps_loc['latitude']
+                st.session_state.p2_lon = gps_loc['longitude']
+                
+        st.write("---")
+        
+        st.write("**First Plot Outside Corner (P1)**")
         lat1_dd = st.number_input("P1 Latitude (DD)", value=st.session_state.p1_lat, format="%.8f")
         lon1_dd = st.number_input("P1 Longitude (DD)", value=st.session_state.p1_lon, format="%.8f")
         
-        st.write("---")
         st.write("**Alignment Point (P2)**")
-        
-        # Geolocation Button for P2
-        p2_loc = streamlit_geolocation(key="p2_geo")
-        if p2_loc and p2_loc.get('latitude'):
-            st.session_state.p2_lat = p2_loc['latitude']
-            st.session_state.p2_lon = p2_loc['longitude']
-            
         lat2_dd = st.number_input("P2 Latitude (DD)", value=st.session_state.p2_lat, format="%.8f")
         lon2_dd = st.number_input("P2 Longitude (DD)", value=st.session_state.p2_lon, format="%.8f")
         
