@@ -294,7 +294,8 @@ with map_container:
             for c in col_sequence:
                 p = next(plot for plot in plot_data if plot["Row"] == r+1 and plot["Col"] == c+1)
                 bl_lat, bl_lon = p["Corners_DD"][0] 
-                stake_points.append({"Stake_ID": f"S{stake_id:03d}", "Plot_ID": p["Plot_ID"], "Lat": bl_lat, "Lon": bl_lon})
+                # Updated ID generation: Just the number as a string (1, 2, 3...)
+                stake_points.append({"Stake_ID": f"{stake_id}", "Plot_ID": p["Plot_ID"], "Lat": bl_lat, "Lon": bl_lon})
                 stake_id += 1
 
         kml = simplekml.Kml()
