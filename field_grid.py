@@ -62,17 +62,22 @@ def get_base_map(center_lat, center_lon, zoom=18):
 st.set_page_config(page_title="Field Trial Grid", layout="centered")
 st.title("🌱 Field Trial Grid")
 
-# Initialize Session State
+# Initialize Session State Variables
 if 'generated' not in st.session_state: st.session_state.generated = False
-
-# Coordinate States
 if 'p1_saved' not in st.session_state: st.session_state.p1_saved = False
 if 'p2_saved' not in st.session_state: st.session_state.p2_saved = False
-# Starting near Dois Vizinhos, PR
-if 'p1_lat' not in st.session_state: st.session_state.p1_lat = -25.733000
-if 'p1_lon' not in st.session_state: st.session_state.p1_lon = -53.058000
-if 'p2_lat' not in st.session_state: st.session_state.p2_lat = -25.734000
-if 'p2_lon' not in st.session_state: st.session_state.p2_lon = -53.058000
+
+# Grid Dimension State 
+if 'rows' not in st.session_state: st.session_state.rows = 10
+if 'cols' not in st.session_state: st.session_state.cols = 4
+if 'plot_len' not in st.session_state: st.session_state.plot_len = 5.0
+if 'plot_wid' not in st.session_state: st.session_state.plot_wid = 2.0
+
+# Starting Default Location 
+if 'p1_lat' not in st.session_state: st.session_state.p1_lat = -22.4471995785483
+if 'p1_lon' not in st.session_state: st.session_state.p1_lon = -47.07321466883996
+if 'p2_lat' not in st.session_state: st.session_state.p2_lat = -22.4481995785483 # Slightly offset for alignment vector
+if 'p2_lon' not in st.session_state: st.session_state.p2_lon = -47.07321466883996
 
 
 # ==========================================
@@ -112,29 +117,41 @@ if not st.session_state.generated:
         else:
             st.warning("⚠️ Tap the 'Get Location' icon above first!")
 
-    # Grid Configuration
+    # Grid Configuration (Saved firmly to session_state)
     with st.expander("📐 Grid Dimensions", expanded=True):
         col1, col2 = st.columns(2)
-        rows = col1.number_input("Rows", min_value=1, value=10, step=1)
-        cols = col2.number_input("Columns", min_value=1, value=4, step=1)
+        st.session_state.rows = col1.number_input("Rows", min_value=1, value=st.session_state.rows, step=1)
+        st.session_state.cols = col2.number_input("Columns", min_value=1, value=st.session_state.cols, step=1)
         col3, col4 = st.columns(2)
-        plot_len = col3.number_input("Length (m)", min_value=0.1, value=5.0, step=0.5)
-        plot_wid = col4.number_input("Width (m)", min_value=0.1, value=2.0, step=0.5)
+        st.session_state.plot_len = col3.number_input("Length (m)", min_value=0.1, value=st.session_state.plot_len, step=0.5)
+        st.session_state.plot_wid = col4.number_input("Width (m)", min_value=0.1, value=st.session_state.plot_wid, step=0.5)
         
     # Manual Coordinate View/Edit
     with st.expander("✏️ View/Edit Coordinates", expanded=False):
-        st.write("Edit manually if needed. Coordinates update automatically when you save points above.")
-        new_p1_lat = st.number_input("Point A Lat", value=st.session_state.p1_lat, format="%.8f")
-        new_p1_lon = st.number_input("Point A Lon", value=st.session_state.p1_lon, format="%.8f")
-        new_p2_lat = st.number_input("Point B Lat", value=st.session_state.p2_lat, format="%.8f")
-        new_p2_lon = st.number_input("Point B Lon", value=st.session_state.p2_lon, format="%.8f")
+        input_format = st.radio("Format", ["Decimal Degrees (DD)", "GMS (Single Smart Field)"])
         
-        if st.button("Apply Manual Edit", use_container_width=True):
-            st.session_state.p1_lat, st.session_state.p1_lon = new_p1_lat, new_p1_lon
-            st.session_state.p2_lat, st.session_state.p2_lon = new_p2_lat, new_p2_lon
-            st.session_state.p1_saved = True
-            st.session_state.p2_saved = True
-            st.rerun()
+        if input_format == "Decimal Degrees (DD)":
+            st.write("Edit manually if needed. Coordinates update automatically when you save points above.")
+            new_p1_lat = st.number_input("Point A Lat", value=st.session_state.p1_lat, format="%.8f")
+            new_p1_lon = st.number_input("Point A Lon", value=st.session_state.p1_lon, format="%.8f")
+            new_p2_lat = st.number_input("Point B Lat", value=st.session_state.p2_lat, format="%.8f")
+            new_p2_lon = st.number_input("Point B Lon", value=st.session_state.p2_lon, format="%.8f")
+            
+            if st.button("Apply Manual Edit", use_container_width=True):
+                st.session_state.p1_lat, st.session_state.p1_lon = new_p1_lat, new_p1_lon
+                st.session_state.p2_lat, st.session_state.p2_lon = new_p2_lat, new_p2_lon
+                st.session_state.p1_saved = True
+                st.session_state.p2_saved = True
+                st.rerun()
+                
+        elif input_format == "GMS (Single Smart Field)":
+            st.write("**Point A (Start)**")
+            lat1_smart = st.text_input("A Lat", value="22 26 49.9 S")
+            lon1_smart = st.text_input("A Lon", value="47 04 23.6 W")
+            st.write("**Point B (Direction)**")
+            lat2_smart = st.text_input("B Lat", value="22 26 53.5 S")
+            lon2_smart = st.text_input("B Lon", value="47 04 23.6 W")
+            st.info("The Smart Field parsing handles coordinates on generation.")
 
     st.divider()
 
@@ -153,7 +170,7 @@ if not st.session_state.generated:
 with map_container:
     # --- PHASE 1: ALIGNMENT & CAPTURE ---
     if not st.session_state.generated:
-        # Start the map at P1 (or defaults to Dois Vizinhos), Zoom 18 (~200m scale)
+        # Start the map at P1, Zoom 18 (~200m scale)
         m_live = get_base_map(st.session_state.p1_lat, st.session_state.p1_lon, zoom=18)
         
         # Draw the points if the user has saved them
@@ -174,22 +191,28 @@ with map_container:
         bearing_perp = (bearing + 90) % 360
         
         plot_data = []
-        for r in range(rows):
-            for c in range(cols):
-                dist_down = r * plot_len
-                dist_across = c * plot_wid
+        # Uses session_state for grid dimensions here
+        for r in range(st.session_state.rows):
+            for c in range(st.session_state.cols):
+                dist_down = r * st.session_state.plot_len
+                dist_across = c * st.session_state.plot_wid
                 
                 pt1 = move_point(move_point(start_point, bearing, dist_down), bearing_perp, dist_across) 
-                pt2 = move_point(pt1, bearing, plot_len) 
-                pt3 = move_point(pt2, bearing_perp, plot_wid) 
-                pt4 = move_point(pt1, bearing_perp, plot_wid) 
+                pt2 = move_point(pt1, bearing, distance_m=st.session_state.plot_len) 
+                pt3 = move_point(pt2, bearing_perp, distance_m=st.session_state.plot_wid) 
+                pt4 = move_point(pt1, bearing_perp, distance_m=st.session_state.plot_wid) 
                 
                 plot_data.append({
                     "Plot_ID": f"{c+1}{(r+1):02d}", "Row": r + 1, "Col": c + 1,
                     "Corners_DD": [pt1, pt2, pt3, pt4]
                 })
 
-        outside_corners = [start_point, move_point(start_point, bearing, rows * plot_len), move_point(move_point(start_point, bearing, rows * plot_len), bearing_perp, cols * plot_wid), move_point(start_point, bearing_perp, cols * plot_wid)]
+        outside_corners = [
+            start_point, 
+            move_point(start_point, bearing, st.session_state.rows * st.session_state.plot_len), 
+            move_point(move_point(start_point, bearing, st.session_state.rows * st.session_state.plot_len), bearing_perp, st.session_state.cols * st.session_state.plot_wid), 
+            move_point(start_point, bearing_perp, st.session_state.cols * st.session_state.plot_wid)
+        ]
 
         st.success("✅ Grid Generated! Review on the map before exporting.")
         
@@ -217,8 +240,8 @@ with map_container:
         # 1. Serpentine Stakeout Routing (For Emlid Flow)
         stake_points = []
         stake_id = 1
-        for r in range(rows):
-            col_sequence = range(cols) if r % 2 == 0 else reversed(range(cols))
+        for r in range(st.session_state.rows):
+            col_sequence = range(st.session_state.cols) if r % 2 == 0 else reversed(range(st.session_state.cols))
             for c in col_sequence:
                 p = next(plot for plot in plot_data if plot["Row"] == r+1 and plot["Col"] == c+1)
                 bl_lat, bl_lon = p["Corners_DD"][0] 
