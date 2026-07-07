@@ -282,7 +282,12 @@ with map_container:
         # --- EXPORT LOGIC ---
         st.subheader("💾 Download Formats")
         
-        # 1. Serpentine Stakeout Routing (For CSV)
+        st.write("**KML Options:**")
+        opt_col1, opt_col2 = st.columns(2)
+        kml_export_polygons = opt_col1.checkbox("Include Polygons", value=True)
+        kml_export_waypoints = opt_col2.checkbox("Include Serpentine Waypoints", value=False)
+        
+        # 1. Serpentine Stakeout Routing
         stake_points = []
         stake_id = 1
         for r in range(st.session_state.rows):
@@ -290,8 +295,8 @@ with map_container:
             for c in col_sequence:
                 p = next(plot for plot in plot_data if plot["Row"] == r+1 and plot["Col"] == c+1)
                 bl_lat, bl_lon = p["Corners_DD"][0] 
-                # Pure numbers for Emlid CSV
-                stake_points.append({"Stake_ID": str(stake_id), "Plot_ID": p["Plot_ID"], "Lat": bl_lat, "Lon": bl_lon})
+                # FIX: 3-digit zero-padded number for perfect alphabetical sorting in KMLs (001, 002... 010)
+                stake_points.append({"Stake_ID": f"{stake_id:03d}", "Plot_ID": p["Plot_ID"], "Lat": bl_lat, "Lon": bl_lon})
                 stake_id += 1
 
         # 2. Emlid Flow Native CSV (For Staking)
@@ -305,15 +310,33 @@ with map_container:
             })
         emlid_csv_str = pd.DataFrame(emlid_csv_data).to_csv(index=False)
 
-        # 3. KML Generation (Strictly Polygons for Background Map)
+        # 3. KML Generation
         kml = simplekml.Kml()
-        fold_poly = kml.newfolder(name="Plots")
-        for p in plot_data:
-            coords = [(lon, lat) for lat, lon in p["Corners_DD"]]
-            coords.append(coords[0])
-            pol = fold_poly.newpolygon(name=p["Plot_ID"], outerboundaryis=coords)
-            pol.style.polystyle.color = simplekml.Color.changealphaint(100, simplekml.Color.green)
+        if kml_export_polygons:
+            fold_poly = kml.newfolder(name="Plots")
+            for p in plot_data:
+                coords = [(lon, lat) for lat, lon in p["Corners_DD"]]
+                coords.append(coords[0])
+                pol = fold_poly.newpolygon(name=p["Plot_ID"], outerboundaryis=coords)
+                pol.style.polystyle.color = simplekml.Color.changealphaint(100, simplekml.Color.green)
+        
+        if kml_export_waypoints:
+            fold_stakes = kml.newfolder(name="Serpentine Stakeout")
+            for st_pt in stake_points:
+                pnt = fold_stakes.newpoint(name=st_pt["Stake_ID"], description=f"Plot {st_pt['Plot_ID']} BL", coords=[(st_pt["Lon"], st_pt["Lat"])])
+                pnt.style.iconstyle.icon.href = 'http://maps.google.com/mapfiles/kml/shapes/placemark_square.png'
+                
         kml_string = kml.kml()
+
+        # Dynamic KML Label
+        if kml_export_polygons and kml_export_waypoints:
+            kml_label = "📥 KML (Polygons & Waypoints)"
+        elif kml_export_polygons:
+            kml_label = "📥 KML (Polygons Only)"
+        elif kml_export_waypoints:
+            kml_label = "📥 KML (Waypoints Only)"
+        else:
+            kml_label = "📥 KML (Empty)"
 
         # 4. GeoJSON Generation
         features = []
@@ -326,8 +349,8 @@ with map_container:
         # 5. Render Download Buttons
         dl_col1, dl_col2 = st.columns(2)
         with dl_col1:
-            st.download_button("📥 KML (Background Map / Polygons)", data=kml_string, file_name="field_grid.kml", mime="application/vnd.google-earth.kml+xml", use_container_width=True)
-            st.download_button("📥 CSV Emlid Flow (Stakeout Points)", data=emlid_csv_str, file_name="emlid_stakeout.csv", mime="text/csv", use_container_width=True)
+            st.download_button(kml_label, data=kml_string, file_name="field_grid.kml", mime="application/vnd.google-earth.kml+xml", use_container_width=True, disabled=not(kml_export_polygons or kml_export_waypoints))
+            st.download_button("📥 Emlid Flow CSV (Staking)", data=emlid_csv_str, file_name="emlid_stakeout.csv", mime="text/csv", use_container_width=True)
         with dl_col2:
             st.download_button("📥 GeoJSON File", data=geojson_str, file_name="field_grid.geojson", mime="application/geo+json", use_container_width=True)
             if HAS_GPD:
