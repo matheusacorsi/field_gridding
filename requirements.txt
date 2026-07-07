@@ -4,5 +4,6 @@ simplekml
 geopy
 folium
 streamlit-folium
+streamlit-geolocation
 openpyxl
 geopandas
